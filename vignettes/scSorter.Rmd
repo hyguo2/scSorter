@@ -1,0 +1,123 @@
+---
+title: "Single-cell Sorter"
+author: "Hongyu Guo"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{scSorter}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+---
+references:
+- id: tmpancreas
+  title: Single-cell transcriptomics of 20 mouse organs creates a Tabula Muris.
+  author:
+  - family: Tabula Muris Consortium and others
+    given: 
+  container-title: Nature
+  volume: 562
+  URL: 'https://www.nature.com/articles/s41586-018-0590-4'
+  DOI: 10.1038/s41586-018-0590-4
+  issue: 
+  publisher: Genome Research
+  page: 367-372
+  type: article-journal
+  issued:
+    year: 2018
+    month: 10
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+The scSorter package implements the semi-supervised cell type assignment algorithm described in "scSorter: assigning cells to known cell types according to known marker genes" (not yet published). This algorithm assigns cells to known cell types, assuming that the identities of marker genes are given but the exact expression levels of marker genes are unavailable. This vignette will illustrate the steps to apply the algorithm to single-cell RNA sequencing (scRNA-seq) data.
+
+## Section 1 - Preliminaries
+scSorter takes as input data the expression matrix from single-cell RNA sequencing and the annotation file that specifies the names of marker genes for each cell type of interest. scSorter assumes the input expression data have been properly normalized for the library size and have been properly transformed (e.g. log-transformation) to stabilize the variance.
+
+To start the analysis, load scSorter package:
+
+```{r}
+library(scSorter)
+```
+
+### Real Data Example - TM pancreas
+
+In this vignette, we will use the data created by the Tabula Muris Consortium [@tmpancreas] to illustrate the procedure for scSorter to assign cells to known cell types. We follow the analysis presented in our paper and focus on pancreas tissue from which 1,564 cells with valid cell type annotation are available. The cells are from: pancreatic A (390 cells), pancreatic B (449 cells), pancreatic D (140 cells), pancreatic PP (73 cells), pancreatic acinar (182 cells), pancreatic ductal (161 cells), pancreatic stellate (49 cells), endothelial (66 cells) and immune (54 cells). Marker genes for these cell types are extracted from the original study.
+
+### Examing the data
+We first load the data to ensure they are in the correct formats.
+```{r}
+load(system.file('extdata', 'TMpancreas.RData', package = 'scSorter'))
+```
+
+The expression matrix *expr* should represent genes by rows and cells by columns.
+```{r}
+expr[1:5, 1:5]
+dim(expr)
+```
+
+Next, we check the annotation file.
+```{r}
+head(anno)
+```
+The annotation file could be stored in a matrix or a data frame. Two columns, "Type" and "Marker", are mandatory as they record the names of marker genes for each cell type of interest and will guide scSorter to assign cells to each cell type. The third column "Weight" is optional. As explained in our paper, weights could be assigned to each marker gene to represent their relative importance during the cell type assignment. A larger weight reflects more confidence of a gene being a marker gene of the corresponding cell type. If such knowledge is not available, we recommend simply choose a constant value for all marker genes by setting the *default_weight* option in the scSorter main function and the "Weight" column could therefore be omitted.
+
+Now that the formats of these data are correct, we could proceed to the next step.
+
+## Section 2 - Preprocessing the data
+scSorter does not need all genes from the original expression matrix to conduct cell type assignment. Instead, it uses only marker genes and a selected group of highly variable genes other than marker genes to conduct the analysis. scSorter also requires the input expression data to be properly normalized for the library size and properly transformed to stabilize the variance. There are plenty of packages that could preprocess the data. Here, we use the package Seurat to illustrate this step.
+
+First, we normalize and transform the data with NormalizeData() function.
+```{r}
+library(Seurat)
+expr_obj = CreateSeuratObject(expr)
+expr_obj <- NormalizeData(expr_obj, normalization.method = "LogNormalize", scale.factor = 10000, verbose = F)
+```
+
+Then, we choose highly variable genes by FindVariableFeatures() function. We also filter out genes with non-zero expression in less than 10% of total cells.
+```{r}
+expr_obj <- FindVariableFeatures(expr_obj, selection.method = "vst", nfeatures = 2000, verbose = F)
+topgenes <- head(VariableFeatures(expr_obj), 2000)
+
+expr = GetAssayData(expr_obj)
+topgene_filter = rowSums(as.matrix(expr)[topgenes, ]!=0) > ncol(expr)*.1
+topgenes = topgenes[topgene_filter]
+```
+
+At last, we subset the preprocessed expression data. Now, we are ready to run scSorter.
+```{r}
+picked_genes = unique(c(anno$Marker, topgenes))
+expr = expr[rownames(expr) %in% picked_genes, ]
+```
+
+## Section 3 - Running scSorter
+The scSorter function requires the preprocessed data as input. As mentioned in Section 1, if the "Weight" column is omitted in the annotation file, a single weight should be specified for marker genes by using the *default_weight* option. Otherwise, the algorithm will use the weights from the annotation file to conduct the analysis.
+
+```{r}
+rts <- scSorter(expr, anno)
+```
+
+### Viewing Results
+The cell type assignment results are stored in the Pred_Type vector.
+```{r}
+print(table(rts$Pred_Type))
+```
+
+The misclassification rate is:
+```{r}
+mis_rate = 1 - mean(rts$Pred_Type == true_type)
+round(mis_rate, 4)
+```
+
+The confusion matrix is:
+```{r}
+table(true_type, rts$Pred_Type)
+```
+
+## References
